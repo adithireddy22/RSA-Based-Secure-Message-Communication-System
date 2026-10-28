@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSA Secure Chat</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c2230; --muted:#6b7385; --accent:#2557d6; --border:#dde1e8; --bad:#c0392b; --good:#1e8449; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12151c; --card:#1b2029; --text:#e8ebf2; --muted:#98a0b3; --accent:#6c93ff; --border:#2d3442; --bad:#ff7b6b; --good:#5fd08a; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 60px; }
+  header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+  h1 { font-size:20px; margin:0; } h2 { font-size:16px; margin:0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:16px; }
+  input, textarea, select { width:100%; padding:8px 10px; margin:4px 0 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text); font:inherit; }
+  textarea { min-height:80px; resize:vertical; }
+  .mono { font-family:ui-monospace,monospace; font-size:12px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--border); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; } .row > * { flex:1; min-width:220px; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .msg { border-top:1px solid var(--border); padding:10px 0; }
+  .msg:first-child { border-top:0; }
+  .meta { color:var(--muted); font-size:12px; }
+  .ct { word-break:break-all; color:var(--muted); }
+  .ok { color:var(--good); } .err { color:var(--bad); }
+  .hidden { display:none; }
+  .warn { background:rgba(192,57,43,.1); border:1px solid var(--bad); padding:10px; border-radius:6px; margin:8px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>🔐 RSA Secure Chat</h1><div id="who"></div></header>
+
+  <section id="auth" class="card hidden">
+    <div class="row">
+      <div>
+        <h2>Register</h2>
+        <input id="r-user" placeholder="Username" autocomplete="username">
+        <input id="r-pass" type="password" placeholder="Password (min 8 chars)" autocomplete="new-password">
+        <button id="btn-register">Create account &amp; generate RSA keys</button>
+      </div>
+      <div>
+        <h2>Login</h2>
+        <input id="l-user" placeholder="Username" autocomplete="username">
+        <input id="l-pass" type="password" placeholder="Password" autocomplete="current-password">
+        <button id="btn-login">Login</button>
+      </div>
+    </div>
+    <p id="auth-msg"></p>
+    <div id="keybox" class="hidden">
+      <div class="warn"><b>Save your private key now.</b> It is shown only once and is not stored on the server. Without it you cannot read your messages.</div>
+      <textarea id="newkey" class="mono" readonly></textarea>
+      <button id="btn-dl" class="ghost">Download private key</button>
+    </div>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="card">
+      <h2>Send an encrypted message</h2>
+      <select id="to"></select>
+      <textarea id="text" placeholder="Type your message..."></textarea>
+      <button id="btn-send">Encrypt &amp; send</button>
+      <p id="send-msg"></p>
+      <div id="send-ct" class="mono ct"></div>
+    </div>
+
+    <div class="card">
+      <h2>Your private key (for decrypting)</h2>
+      <p class="meta">Paste the key you saved at registration. It is only sent when you click Decrypt, and is never stored.</p>
+      <textarea id="privkey" class="mono" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+    </div>
+
+    <div class="card">
+      <div class="tabs"><button id="tab-in">Inbox</button><button id="tab-out" class="ghost">Sent</button></div>
+      <div id="list"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let box = "inbox";
+
+async function api(path, body) {
+  const opts = body ? { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) } : {};
+  const res = await fetch("/api/" + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Request failed");
+  return data;
+}
+function say(el, text, ok) { el.textContent = text; el.className = ok ? "ok" : "err"; }
+
+async function refreshSession() {
+  const { username } = await api("me");
+  $("auth").classList.toggle("hidden", !!username);
+  $("app").classList.toggle("hidden", !username);
+  $("who").innerHTML = "";
+  if (username) {
+    const s = document.createElement("span");
+    s.textContent = username + " ";
+    const b = document.createElement("button");
+    b.className = "ghost"; b.textContent = "Logout";
+    b.onclick = async () => { await api("logout", {}); refreshSession(); };
+    $("who").append(s, b);
+    loadUsers(); loadBox();
+  }
+}
+
+async function loadUsers() {
+  const { users } = await api("users");
+  $("to").innerHTML = "";
+  users.forEach(u => { const o = document.createElement("option"); o.value = o.textContent = u; $("to").append(o); });
+}
+
+async function loadBox() {
+  const { messages } = await api(box);
+  const list = $("list"); list.innerHTML = "";
+  if (!messages.length) { list.textContent = "No messages."; return; }
+  messages.forEach(m => {
+    const d = document.createElement("div"); d.className = "msg";
+    const meta = document.createElement("div"); meta.className = "meta";
+    meta.textContent = `${box === "inbox" ? "From" : "To"} ${m.other} · ${m.created_at} UTC · #${m.id}`;
+    const ct = document.createElement("div"); ct.className = "mono ct";
+    ct.textContent = "Ciphertext: " + m.ciphertext;
+    d.append(meta, ct);
+    if (box === "inbox") {
+      const out = document.createElement("div");
+      const btn = document.createElement("button"); btn.className = "ghost"; btn.textContent = "Decrypt";
+      btn.onclick = async () => {
+        try { const r = await api("decrypt", { message_id:m.id, private_key:$("privkey").value }); say(out, "🔓 " + r.message, true); }
+        catch (e) { say(out, e.message, false); }
+      };
+      d.append(btn, out);
+    }
+    list.append(d);
+  });
+}
+
+$("btn-register").onclick = async () => {
+  try {
+    const r = await api("register", { username:$("r-user").value, password:$("r-pass").value });
+    say($("auth-msg"), "Account created. Now log in.", true);
+    $("newkey").value = r.private_key; $("keybox").classList.remove("hidden");
+  } catch (e) { say($("auth-msg"), e.message, false); }
+};
+$("btn-dl").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([$("newkey").value], { type:"text/plain" }));
+  a.download = "private_key.pem"; a.click();
+};
+$("btn-login").onclick = async () => {
+  try { await api("login", { username:$("l-user").value, password:$("l-pass").value }); refreshSession(); }
+  catch (e) { say($("auth-msg"), e.message, false); }
+};
+$("btn-send").onclick = async () => {
+  try {
+    const r = await api("send", { receiver:$("to").value, message:$("text").value });
+    say($("send-msg"), "Sent. Only ciphertext was stored:", true);
+    $("send-ct").textContent = r.ciphertext; $("text").value = "";
+    if (box === "sent") loadBox();
+  } catch (e) { say($("send-msg"), e.message, false); }
+};
+$("tab-in").onclick = () => { box = "inbox"; $("tab-in").className = ""; $("tab-out").className = "ghost"; loadBox(); };
+$("tab-out").onclick = () => { box = "sent"; $("tab-out").className = ""; $("tab-in").className = "ghost"; loadBox(); };
+refreshSession();
+</script>
+</body>
+</html>
